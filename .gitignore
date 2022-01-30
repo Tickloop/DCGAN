@@ -4,3 +4,5 @@ __pycache__/
 models/
 gifs/
 plots/
+img_test.py
+img_resize.py
