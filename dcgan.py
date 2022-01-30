@@ -11,20 +11,21 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Running model on device: ", device)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', default="downsized", type=str, dest="data_dir", help="Whether to use simplified or cropped images")
+parser.add_argument('--data_dir', default="simpsons_simplified_64", type=str, help="Whether to use simplified or cropped images")
 parser.add_argument('--channels', default=3, type=int, help="The number of channels to store in the image. 0 will store image in gray, 3 for rgb/bgr")
 parser.add_argument('--batch_size', default=100, type=int, help="The number of samples to be used in one forward pass of generator and discriminator")
 parser.add_argument('--epochs', default=100, type=int, help="Number of iterrations to train the network for")
 parser.add_argument('--latent_dim', default=100, type=int, help="The dimenssion of noise to be fed into the generator network")
 parser.add_argument('--no_samples', default=True, action='store_false', dest="samples", help="Whether to store samples from each epoch or not")
+parser.add_argument('--sample_every', default=100, type=int, help="The number of epochs after which a sample of 16 random images from a batch are tested")
 options = parser.parse_args()
 
 print("Arguments for current run: ")
 print(options)
 
-if options.data_dir == "downsized":
+if options.data_dir == "simpsons_128":
     img_size = 128
-elif options.data_dir == "simplified_downsized" or options.data_dir == "down_celeb":
+elif options.data_dir == "celeba_64" or options.data_dir == "simpsons_simplified_64":
     img_size = 64
 class Generator(nn.Module):
     def __init__(self):
@@ -39,13 +40,12 @@ class Generator(nn.Module):
         def ConvBlock(inChannels, outChannels, last=False):
             layers = [
                 nn.ConvTranspose2d(inChannels, outChannels, kernel_size=4, stride=2, padding=1),
-                nn.BatchNorm2d(outChannels),
             ]
 
             if last:
                 layers.append(nn.Tanh())
             else:
-                # layers.append(nn.Dropout(p=0.2))
+                layers.append(nn.BatchNorm2d(outChannels))
                 layers.append(nn.ReLU())
             
             return layers
@@ -75,19 +75,25 @@ class Discriminator(nn.Module):
         self.channels = [3, 64, 128, 256, 512, 1024]
         self.final_size = img_size // ( 2 ** (len(self.channels) - 1))
         
-        def ConvBlock(inChannels, outChannels):
-            return [
-                nn.Conv2d(inChannels, outChannels, kernel_size=4, stride=2, padding=1),
-                nn.BatchNorm2d(outChannels),
-                nn.LeakyReLU(0.2),
-            ]
+        def ConvBlock(inChannels, outChannels, last=False):
+            if last:
+                return [
+                    nn.Conv2d(inChannels, outChannels, kernel_size=4, stride=2, padding=1),
+                    nn.LeakyReLU(0.2),
+                ]
+            else:
+                return [
+                    nn.Conv2d(inChannels, outChannels, kernel_size=4, stride=2, padding=1),
+                    nn.BatchNorm2d(outChannels),
+                    nn.LeakyReLU(0.2),
+                ]
         
         self.model = nn.Sequential(
             *ConvBlock(self.channels[0], self.channels[1]),
             *ConvBlock(self.channels[1], self.channels[2]),
             *ConvBlock(self.channels[2], self.channels[3]),
             *ConvBlock(self.channels[3], self.channels[4]),
-            *ConvBlock(self.channels[4], self.channels[5])
+            *ConvBlock(self.channels[4], self.channels[5], last=True)
         )
 
 
@@ -110,10 +116,9 @@ def dataLoader(images):
         If simplified is passed as a flag then simplified images are used
         If channels is 0 then gray images are used
     """
-    COLOR = cv2.IMREAD_COLOR if options.channels == 3 else cv2.IMREAD_GRAYSCALE
     for path, dirs, files in os.walk(f"data/{options.data_dir}"):
         for file in tqdm(files):
-            img = cv2.imread(f"{path}/{file}", COLOR)
+            img = cv2.imread(f"{path}/{file}")
             images.append(img)
     rows = 4
     cols = 4
@@ -187,6 +192,9 @@ def train(generator, discriminator, images):
         print(f"Epoch {epoch + 1} / {options.epochs}: Generator Loss: {generator_loss} Discriminator Loss: {discriminator_loss}")
 
         writeImages(fake_images, epoch)
+
+        if epoch % options.sample_every == 0:
+            writeSamples(fake_images, epoch)
     
     plotLoss(gLoss, dLoss)
     
@@ -203,29 +211,40 @@ def writeImages(batch, epoch):
         image *= 255
 
         # writing this for sanity check
-        cv2.imwrite(f"./samples/sample_epoch_{epoch}.jpg", image)
+        cv2.imwrite(f"./samples/{options.data_dir}/sample_epoch_{epoch}_of_{options.epochs}.jpg", image)
 
-def save_models(generator, discriminator, **kwargs):
-    to_save = {
-        "generator": generator.state_dict(),
-        "discriminator": discriminator.state_dict(),
-    }
+def save_models(generator, discriminator, ):
+    generator_model = torch.jit.script(generator)
+    generator_model.save(f"models/{options.data_dir}/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_g.pt")
 
-    if "loss" in kwargs:
-        to_save["loss"] = kwargs.get("loss")
-    
-    if "gOptim" in kwargs:
-        to_save["gOptim"] = kwargs.get("gOptim").state_dict()
-    
-    if "dOptim" in kwargs:
-        to_save["dOptim"] = kwargs.get("dOptim").state_dict()
-    
-    torch.save(to_save, f"models/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.pt")
+    discriminator_model = torch.jit.script(discriminator)
+    discriminator_model.save(f"models/{options.data_dir}/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_d.pt")
 
 def plotLoss(gLoss, dLoss):
     x = np.arange(0, options.epochs, 1)
     plt.plot(x, gLoss, 'r', x, dLoss, 'g')
-    plt.savefig(f"plots/loss_plot_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.png")
+    plt.savefig(f"plots/{options.data_dir}/loss_plot_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.png")
+    plt.close('all')
+
+def writeSamples(images, epoch):
+    images = images.cpu().detach()
+    choices = np.random.choice(np.arange(options.batch_size), size=16)
+    rows = 4
+    cols = 4
+    figure = plt.figure(figsize=(6, 6))
+
+    for idx in range(rows * cols):
+        figure.add_subplot(rows, cols, idx + 1)
+        img = images[choices[idx]]
+        img = img.view(img_size, img_size, 3).numpy()
+        img = (img + 1) / 2
+        img *= 255
+        img = img.astype('int32')
+
+        plt.imshow(img)
+    
+    plt.savefig(f"figures/{options.data_dir}/{epoch}_of_{options.epochs}_{img_size}_{options.data_dir}.png")
+    plt.close(figure)
 
 def main():
     images = []
@@ -240,9 +259,9 @@ def main():
     generator.to(device)
     discriminator.to(device)
 
-    g_optimizer, d_optimizer, loss_func = train(generator, discriminator, images)
+    train(generator, discriminator, images)
 
-    save_models(generator, discriminator, loss=loss_func, gOptim=g_optimizer, dOptim=d_optimizer)
+    save_models(generator, discriminator)
 
 if __name__ == "__main__":
     main()
