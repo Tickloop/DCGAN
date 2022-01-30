@@ -1,5 +1,3 @@
-from asyncore import write
-from typing import Dict
 import cv2
 import os
 import numpy as np
@@ -24,14 +22,16 @@ options = parser.parse_args()
 print("Arguments for current run: ")
 print(options)
 
-img_size = 128 if options.data_dir == "downsized" else 200
-
+if options.data_dir == "downsized":
+    img_size = 128
+elif options.data_dir == "simplified_downsized" or options.data_dir == "down_celeb":
+    img_size = 64
 class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
         
-        self.channels = [243, 81, 27, 9, 3]
-        self.init_size = 8
+        self.channels = [1024, 512, 256, 128, 64, 3]
+        self.init_size = img_size // ( 2 ** (len(self.channels) - 1))
 
         # mapping our latent dimenssion to something that can be turned into something convolutable
         self.linear = nn.Linear(options.latent_dim, self.channels[0] * self.init_size ** 2)
@@ -40,12 +40,12 @@ class Generator(nn.Module):
             layers = [
                 nn.ConvTranspose2d(inChannels, outChannels, kernel_size=4, stride=2, padding=1),
                 nn.BatchNorm2d(outChannels),
-                nn.Dropout(p=0.2)
             ]
 
             if last:
                 layers.append(nn.Tanh())
             else:
+                # layers.append(nn.Dropout(p=0.2))
                 layers.append(nn.ReLU())
             
             return layers
@@ -58,7 +58,8 @@ class Generator(nn.Module):
             *ConvBlock(self.channels[0], self.channels[1]),
             *ConvBlock(self.channels[1], self.channels[2]),
             *ConvBlock(self.channels[2], self.channels[3]),
-            *ConvBlock(self.channels[3], self.channels[4], last=True)
+            *ConvBlock(self.channels[3], self.channels[4]),
+            *ConvBlock(self.channels[4], self.channels[5], last=True)
         )
     
     def forward(self, x):
@@ -71,8 +72,8 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
-        self.channels = [3, 9, 27, 81, 243]
-        self.final_size = 8
+        self.channels = [3, 64, 128, 256, 512, 1024]
+        self.final_size = img_size // ( 2 ** (len(self.channels) - 1))
         
         def ConvBlock(inChannels, outChannels):
             return [
@@ -85,13 +86,14 @@ class Discriminator(nn.Module):
             *ConvBlock(self.channels[0], self.channels[1]),
             *ConvBlock(self.channels[1], self.channels[2]),
             *ConvBlock(self.channels[2], self.channels[3]),
-            *ConvBlock(self.channels[3], self.channels[4])
+            *ConvBlock(self.channels[3], self.channels[4]),
+            *ConvBlock(self.channels[4], self.channels[5])
         )
 
 
         # need to reshape to be of the form (N, C * H * W)
         self.linear = nn.Sequential(
-            nn.Linear(self.channels[4] * self.final_size ** 2, 1),
+            nn.Linear(self.channels[-1] * self.final_size ** 2, 1),
             nn.Sigmoid(),
         )
     
@@ -218,12 +220,12 @@ def save_models(generator, discriminator, **kwargs):
     if "dOptim" in kwargs:
         to_save["dOptim"] = kwargs.get("dOptim").state_dict()
     
-    torch.save(to_save, f"models/{options.epochs}.pt")
+    torch.save(to_save, f"models/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.pt")
 
 def plotLoss(gLoss, dLoss):
     x = np.arange(0, options.epochs, 1)
     plt.plot(x, gLoss, 'r', x, dLoss, 'g')
-    plt.savefig(f"plots/loss_plot_{options.epochs}.png")
+    plt.savefig(f"plots/loss_plot_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.png")
 
 def main():
     images = []
