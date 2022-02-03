@@ -14,8 +14,6 @@ Link to the original paper: https://arxiv.org/abs/1511.06434
 
 ## Results
 
-
-<div style="display: flex; flex-direction: column; align-items: center">
-<img src="./celeba_sample.png" alt="Celebrity images generated my model" style="width: 400px">
 After 50000 epochs, the samples from CelebA dataset
-</div>
+
+<img src="./celeba_sample.png" alt="Celebrity images generated my model" style="width: 400px">
