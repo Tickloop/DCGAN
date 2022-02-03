@@ -6,6 +6,7 @@ from tqdm import tqdm
 import argparse
 import torch
 import torch.nn as nn
+import imageio
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print("Running model on device: ", device)
@@ -13,11 +14,14 @@ print("Running model on device: ", device)
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default="simpsons_simplified_64", type=str, help="Whether to use simplified or cropped images")
 parser.add_argument('--channels', default=3, type=int, help="The number of channels to store in the image. 0 will store image in gray, 3 for rgb/bgr")
-parser.add_argument('--batch_size', default=100, type=int, help="The number of samples to be used in one forward pass of generator and discriminator")
+parser.add_argument('--batch_size', default=128, type=int, help="The number of samples to be used in one forward pass of generator and discriminator")
 parser.add_argument('--epochs', default=100, type=int, help="Number of iterrations to train the network for")
 parser.add_argument('--latent_dim', default=100, type=int, help="The dimenssion of noise to be fed into the generator network")
 parser.add_argument('--no_samples', default=True, action='store_false', dest="samples", help="Whether to store samples from each epoch or not")
 parser.add_argument('--sample_every', default=100, type=int, help="The number of epochs after which a sample of 16 random images from a batch are tested")
+parser.add_argument('--checkpoint_every', default=1000, type=int, help="The number of epochs after which generator and discriminator model are saved")
+parser.add_argument('--no_gif', default=False, action='store_true', help="Whether to store the gif created from samples or not")
+parser.add_argument('--fps', default=24, type=int, help="The frames per second for creating a gif")
 options = parser.parse_args()
 
 print("Arguments for current run: ")
@@ -35,7 +39,10 @@ class Generator(nn.Module):
         self.init_size = img_size // ( 2 ** (len(self.channels) - 1))
 
         # mapping our latent dimenssion to something that can be turned into something convolutable
-        self.linear = nn.Linear(options.latent_dim, self.channels[0] * self.init_size ** 2)
+        self.linear = nn.Sequential(
+            nn.Linear(options.latent_dim, self.channels[0] * self.init_size ** 2),
+            nn.ReLU()
+        )
         
         def ConvBlock(inChannels, outChannels, last=False):
             layers = [
@@ -61,6 +68,8 @@ class Generator(nn.Module):
             *ConvBlock(self.channels[3], self.channels[4]),
             *ConvBlock(self.channels[4], self.channels[5], last=True)
         )
+
+        self.linear.apply(initWeights)
     
     def forward(self, x):
         img = self.linear(x)
@@ -96,13 +105,14 @@ class Discriminator(nn.Module):
             *ConvBlock(self.channels[4], self.channels[5], last=True)
         )
 
-
         # need to reshape to be of the form (N, C * H * W)
         self.linear = nn.Sequential(
             nn.Linear(self.channels[-1] * self.final_size ** 2, 1),
             nn.Sigmoid(),
         )
-    
+        
+        self.linear.apply(initWeights)
+
     def forward(self, x):
         is_valid = self.model(x)
         # reshape to fit the linear layer of size (N, C * H * W)
@@ -149,10 +159,13 @@ def train(generator, discriminator, images):
     gLoss = np.zeros(options.epochs)
     dLoss = np.zeros(options.epochs)
 
+    """ In order to maintain our samples, we will create a fixed input vector to get 16 samples """
+    z_fixed = torch.Tensor(np.random.uniform(size=(1, options.latent_dim))).to(device)
+
     for epoch in range(options.epochs):
         real_images = np.array([images[choice] for choice in np.random.choice(np.arange(N), size=options.batch_size)])
 
-        # rescale values between [-1 and 1]
+        # rescale values between [-1 and 1] that is the output of our tanh function
         real_images = 2.0 * (real_images - np.min(real_images)) / np.ptp(real_images) - 1
         real_images = torch.Tensor(real_images).to(device)
         # fancy way to reshape the images to be of the shape (N, C, H, W)
@@ -191,16 +204,22 @@ def train(generator, discriminator, images):
 
         print(f"Epoch {epoch + 1} / {options.epochs}: Generator Loss: {generator_loss} Discriminator Loss: {discriminator_loss}")
 
-        writeImages(fake_images, epoch)
+        fake_image = generator(z_fixed)
+        writeImage(fake_image, epoch)
 
-        if epoch % options.sample_every == 0:
-            writeSamples(fake_images, epoch)
+        if (epoch + 1) % options.sample_every == 0:
+            print(f"WRITIGN SAMPLES - {epoch}/{options.epochs}")
+            writeFigures(fake_images, epoch)
+        
+        if (epoch + 1) % options.checkpoint_every == 0:
+            print(f"SAVING CHECKPOINT - {epoch}/{options.epochs}")
+            saveModels(generator, discriminator, epoch)
     
     plotLoss(gLoss, dLoss)
     
     return discriminator_optimizer, generater_optimizer, adv_loss
 
-def writeImages(batch, epoch):
+def writeImage(batch, epoch):
     """
         Function to make our output for each epoch more meaningful as well as better represented
     """
@@ -211,22 +230,28 @@ def writeImages(batch, epoch):
         image *= 255
 
         # writing this for sanity check
-        cv2.imwrite(f"./samples/{options.data_dir}/sample_epoch_{epoch}_of_{options.epochs}.jpg", image)
+        cv2.imwrite(f"samples/{options.run_name}/sample_epoch_{epoch}_of_{options.epochs}.jpg", image)
 
-def save_models(generator, discriminator, ):
+def saveModels(generator, discriminator, epoch=None):
     generator_model = torch.jit.script(generator)
-    generator_model.save(f"models/{options.data_dir}/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_g.pt")
+    if epoch != None:
+        generator_model.save(f"models/{options.run_name}/checkpoints/{epoch}_of_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_g.pt")
+    else:
+        generator_model.save(f"models/{options.run_name}/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_g.pt")
 
     discriminator_model = torch.jit.script(discriminator)
-    discriminator_model.save(f"models/{options.data_dir}/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_d.pt")
+    if epoch != None:
+        discriminator_model.save(f"models/{options.run_name}/checkpoints/{epoch}_of_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_d.pt")
+    else:
+        discriminator_model.save(f"models/{options.run_name}/{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}_d.pt")
 
 def plotLoss(gLoss, dLoss):
     x = np.arange(0, options.epochs, 1)
     plt.plot(x, gLoss, 'r', x, dLoss, 'g')
-    plt.savefig(f"plots/{options.data_dir}/loss_plot_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.png")
+    plt.savefig(f"plots/{options.run_name}/loss_plot_{options.epochs}_{options.batch_size}_{img_size}_{options.data_dir}.png")
     plt.close('all')
 
-def writeSamples(images, epoch):
+def writeFigures(images, epoch):
     images = images.cpu().detach()
     choices = np.random.choice(np.arange(options.batch_size), size=16)
     rows = 4
@@ -239,12 +264,41 @@ def writeSamples(images, epoch):
         img = img.view(img_size, img_size, 3).numpy()
         img = (img + 1) / 2
         img *= 255
-        img = img.astype('int32')
-
+        img = img.astype(np.uint8)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         plt.imshow(img)
     
-    plt.savefig(f"figures/{options.data_dir}/{epoch}_of_{options.epochs}_{img_size}_{options.data_dir}.png")
+    plt.savefig(f"figures/{options.run_name}/{epoch}_of_{options.epochs}_{img_size}_{options.data_dir}.png")
     plt.close(figure)
+
+def makeDirs():
+    run_name = f"{options.data_dir}/run_{options.epochs}_{options.batch_size}"
+    parent_dirs = ["samples", "plots", "models", "gifs", "figures"]
+
+    # directory for samples, plots, models, gifs, figures corresponding to this run
+    for dir in parent_dirs:
+        if not os.path.isdir(f"{dir}/{run_name}"):
+            os.mkdir(f"{dir}/{run_name}")
+    
+    if not os.path.isdir(f"models/{run_name}/checkpoints"):
+        os.mkdir(f"models/{run_name}/checkpoints")
+
+    options.run_name = run_name
+
+def makeGif():
+    if not options.no_gif:
+        print("Making gif of samples")
+        gif = []
+
+        for filename in tqdm(range(options.epochs)):
+                gif.append(imageio.imread(f"samples/{options.run_name}/sample_epoch_{filename}_of_{options.epochs}.jpg"))
+
+        imageio.mimsave(f"gifs/{options.run_name}/{options.epochs}_{options.batch_size}.gif", gif, fps=options.fps)
+
+def initWeights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.normal_(m.weight, 0, 0.02)
+        # m.bias.data.fill_(0.01)
 
 def main():
     images = []
@@ -254,6 +308,8 @@ def main():
 
     print("Images loaded", images.shape)
 
+    makeDirs()
+
     generator = Generator()
     discriminator = Discriminator()
     generator.to(device)
@@ -261,7 +317,9 @@ def main():
 
     train(generator, discriminator, images)
 
-    save_models(generator, discriminator)
+    saveModels(generator, discriminator)
+
+    makeGif()
 
 if __name__ == "__main__":
     main()
