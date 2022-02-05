@@ -13,15 +13,14 @@ print("Running model on device: ", device)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default="simpsons_simplified_64", type=str, help="Whether to use simplified or cropped images")
-parser.add_argument('--channels', default=3, type=int, help="The number of channels to store in the image. 0 will store image in gray, 3 for rgb/bgr")
 parser.add_argument('--batch_size', default=128, type=int, help="The number of samples to be used in one forward pass of generator and discriminator")
 parser.add_argument('--epochs', default=100, type=int, help="Number of iterrations to train the network for")
-parser.add_argument('--latent_dim', default=100, type=int, help="The dimenssion of noise to be fed into the generator network")
-parser.add_argument('--no_samples', default=True, action='store_false', dest="samples", help="Whether to store samples from each epoch or not")
-parser.add_argument('--sample_every', default=100, type=int, help="The number of epochs after which a sample of 16 random images from a batch are tested")
+parser.add_argument('--no_gif', default=True, action='store_false', dest="gif", help="Whether to store the gif created from samples or not")
+parser.add_argument('--no_preview', default=True, action='store_false', dest="preview", help="Whether to show a preview of the loaded dataset or not")
+parser.add_argument('--no_samples', default=True, action='store_false', dest="samples", help="Whether to store a sample from each epoch or not")
+parser.add_argument('--figure_every', default=100, type=int, help="The number of epochs after which a figure of 16 random images from a batch are tested")
 parser.add_argument('--checkpoint_every', default=1000, type=int, help="The number of epochs after which generator and discriminator model are saved")
-parser.add_argument('--no_gif', default=False, action='store_true', help="Whether to store the gif created from samples or not")
-parser.add_argument('--fps', default=24, type=int, help="The frames per second for creating a gif")
+parser.add_argument('--fps', default=60, type=int, help="The frames per second for creating a gif")
 options = parser.parse_args()
 
 print("Arguments for current run: ")
@@ -31,6 +30,7 @@ if options.data_dir == "simpsons_128":
     img_size = 128
 elif options.data_dir == "celeba_64" or options.data_dir == "simpsons_simplified_64":
     img_size = 64
+
 class Generator(nn.Module):
     def __init__(self):
         super(Generator, self).__init__()
@@ -120,16 +120,7 @@ class Discriminator(nn.Module):
         is_valid = self.linear(is_valid)
         return is_valid
 
-def dataLoader(images):
-    """ 
-        Loads the dataset into an array that has images from https://www.kaggle.com/kostastokis/simpsons-faces 
-        If simplified is passed as a flag then simplified images are used
-        If channels is 0 then gray images are used
-    """
-    for path, dirs, files in os.walk(f"data/{options.data_dir}"):
-        for file in tqdm(files):
-            img = cv2.imread(f"{path}/{file}")
-            images.append(img)
+def showPreview(images):
     rows = 4
     cols = 4
     figure = plt.figure(figsize=(6, 6))
@@ -144,6 +135,19 @@ def dataLoader(images):
     plt.show()
     plt.close(figure)
 
+def dataLoader(images):
+    """ 
+        Loads the dataset into an array that has images from https://www.kaggle.com/kostastokis/simpsons-faces 
+        If simplified is passed as a flag then simplified images are used
+        If channels is 0 then gray images are used
+    """
+    for path, dirs, files in os.walk(f"data/{options.data_dir}"):
+        for file in tqdm(files):
+            img = cv2.imread(f"{path}/{file}")
+            images.append(img)
+    
+    options.preview and showPreview(images)
+    
 
 def train(generator, discriminator, images):
     # optimizers that we will use
@@ -205,7 +209,7 @@ def train(generator, discriminator, images):
         print(f"Epoch {epoch + 1} / {options.epochs}: Generator Loss: {generator_loss} Discriminator Loss: {discriminator_loss}")
 
         fake_image = generator(z_fixed)
-        writeImage(fake_image, epoch)
+        options.samples and writeSample(fake_image, epoch)
 
         if (epoch + 1) % options.sample_every == 0:
             print(f"WRITIGN SAMPLES - {epoch}/{options.epochs}")
@@ -219,7 +223,7 @@ def train(generator, discriminator, images):
     
     return discriminator_optimizer, generater_optimizer, adv_loss
 
-def writeImage(batch, epoch):
+def writeSample(batch, epoch):
     """
         Function to make our output for each epoch more meaningful as well as better represented
     """
@@ -278,7 +282,7 @@ def makeDirs():
     # directory for samples, plots, models, gifs, figures corresponding to this run
     for dir in parent_dirs:
         if not os.path.isdir(f"{dir}/{run_name}"):
-            os.mkdir(f"{dir}/{run_name}")
+            os.makedirs(f"{dir}/{run_name}")
     
     if not os.path.isdir(f"models/{run_name}/checkpoints"):
         os.mkdir(f"models/{run_name}/checkpoints")
@@ -298,7 +302,6 @@ def makeGif():
 def initWeights(m):
     if isinstance(m, nn.Linear):
         nn.init.normal_(m.weight, 0, 0.02)
-        # m.bias.data.fill_(0.01)
 
 def main():
     images = []
@@ -319,7 +322,7 @@ def main():
 
     saveModels(generator, discriminator)
 
-    makeGif()
+    options.gif and makeGif()
 
 if __name__ == "__main__":
     main()
